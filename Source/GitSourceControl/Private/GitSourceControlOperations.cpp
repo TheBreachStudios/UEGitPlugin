@@ -5,7 +5,6 @@
 
 #include "GitSourceControlOperations.h"
 
-#include "CoreMinimal.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 #include "SourceControlOperations.h"
@@ -44,7 +43,7 @@ bool FGitConnectWorker::Execute(FGitSourceControlCommand& InCommand)
 	// More information: this is a heuristic for cases where UE is trying to create
 	// a valid Perforce connection as a side effect for the connect worker. For Git,
 	// the connect worker has no side effects. It is simply a query to retrieve information
-	// to be displayed to the user, like in the source control settings or on init.
+	// to be displayed to the user, like in the revision control settings or on init.
 	// Therefore, there is no need for synchronously establishing a connection if not there.
 	if (InCommand.Concurrency == EConcurrency::Synchronous)
 	{
@@ -56,7 +55,7 @@ bool FGitConnectWorker::Execute(FGitSourceControlCommand& InCommand)
 	// We already know that Git is available if PathToGitBinary is not empty, since it is validated then.
 	if (InCommand.PathToGitBinary.IsEmpty())
 	{
-		const FText& NotFound = LOCTEXT("GitNotFound", "Failed to enable Git source control. You need to install Git and ensure the plugin has a valid path to the git executable.");
+		const FText& NotFound = LOCTEXT("GitNotFound", "Failed to enable Git revision control. You need to install Git and ensure the plugin has a valid path to the git executable.");
 		InCommand.ResultInfo.ErrorMessages.Add(NotFound.ToString());
 		Operation->SetErrorText(NotFound);
 		InCommand.bCommandSuccessful = false;
@@ -124,7 +123,7 @@ bool FGitCheckOutWorker::Execute(FGitSourceControlCommand& InCommand)
 		return InCommand.bCommandSuccessful;
 	}
 
-	const bool bSuccess = GitSourceControlUtils::RunLFSCommand(TEXT("lock"), InCommand.PathToGitRoot, FGitSourceControlModule::GetEmptyStringArray(), LockableRelativeFiles, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
+	const bool bSuccess = GitSourceControlUtils::RunLFSCommand(TEXT("lock"), InCommand.PathToGitRoot, InCommand.PathToGitBinary, FGitSourceControlModule::GetEmptyStringArray(), LockableRelativeFiles, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
 	InCommand.bCommandSuccessful = bSuccess;
 	const FString& LockUser = FGitSourceControlModule::Get().GetProvider().GetLockUser();
 	if (bSuccess)
@@ -133,14 +132,11 @@ bool FGitCheckOutWorker::Execute(FGitSourceControlCommand& InCommand)
 		for (const auto& RelativeFile : RelativeFiles)
 		{
 			FString AbsoluteFile = FPaths::Combine(InCommand.PathToGitRoot, RelativeFile);
-			FGitLockedFilesCache::LockedFiles.Add(AbsoluteFile, LockUser);
+			FGitLockedFilesCache::AddLockedFile(AbsoluteFile, LockUser);
 			FPaths::NormalizeFilename(AbsoluteFile);
 			AbsoluteFiles.Add(AbsoluteFile);
 		}
-		for (const auto& File : AbsoluteFiles)
-		{
-			FPlatformFileManager::Get().GetPlatformFile().SetReadOnly(*File, false);
-		}
+
 		GitSourceControlUtils::CollectNewStates(AbsoluteFiles, States, EFileState::Unset, ETreeState::Unset, ELockState::Locked);
 		for (auto& State : States)
 		{
@@ -309,7 +305,11 @@ bool FGitCheckInWorker::Execute(FGitSourceControlCommand& InCommand)
 																				   "open, files cannot always be updated.\n\n"
 																				   "Please exit the editor, and update the project again."));
 							FText PushFailTitle(LOCTEXT("GitPush_OutOfDate_Title", "Git Pull Required"));
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+							FMessageDialog::Open(EAppMsgType::Ok, PushFailMessage, PushFailTitle);
+#else
 							FMessageDialog::Open(EAppMsgType::Ok, PushFailMessage, &PushFailTitle);
+#endif
 							UE_LOG(LogSourceControl, Log, TEXT("Push failed because we're out of date, prompting user to resolve manually"));
 						}
 					}
@@ -338,14 +338,14 @@ bool FGitCheckInWorker::Execute(FGitSourceControlCommand& InCommand)
 					if (FilesToUnlock.Num() > 0)
 					{
 						// Not strictly necessary to succeed, so don't update command success
-						const bool bUnlockSuccess = GitSourceControlUtils::RunLFSCommand(TEXT("unlock"), InCommand.PathToGitRoot,
+						const bool bUnlockSuccess = GitSourceControlUtils::RunLFSCommand(TEXT("unlock"), InCommand.PathToGitRoot, InCommand.PathToGitBinary,
 																						 FGitSourceControlModule::GetEmptyStringArray(), FilesToUnlock,
 																						 InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
 						if (bUnlockSuccess)
 						{
 							for (const auto& File : LockedFiles)
 							{
-								FGitLockedFilesCache::LockedFiles.Remove(File);
+								FGitLockedFilesCache::RemoveLockedFile(File);
 							}
 						}
 					}
@@ -540,13 +540,14 @@ bool FGitRevertWorker::Execute(FGitSourceControlCommand& InCommand)
 	{
 		if (MissingFiles.Num() > 0)
 		{
-			// "Added" files that have been deleted needs to be removed from source control
+			// "Added" files that have been deleted needs to be removed from revision control
 			InCommand.bCommandSuccessful &= GitSourceControlUtils::RunCommand(TEXT("rm"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, FGitSourceControlModule::GetEmptyStringArray(), MissingFiles, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
 		}
 		if (AllExistingFiles.Num() > 0)
 		{
-			// reset any changes already added to the index
+			// reset and revert any changes already added to the index
 			InCommand.bCommandSuccessful &= GitSourceControlUtils::RunCommand(TEXT("reset"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, FGitSourceControlModule::GetEmptyStringArray(), AllExistingFiles, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
+			InCommand.bCommandSuccessful &= GitSourceControlUtils::RunCommand(TEXT("checkout"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, FGitSourceControlModule::GetEmptyStringArray(), AllExistingFiles, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
 		}
 		if (OtherThanAddedExistingFiles.Num() > 0)
 		{
@@ -578,13 +579,13 @@ bool FGitRevertWorker::Execute(FGitSourceControlCommand& InCommand)
 		if (LockedFiles.Num() > 0)
 		{
 			const TArray<FString>& RelativeFiles = GitSourceControlUtils::RelativeFilenames(LockedFiles, InCommand.PathToGitRoot);
-			InCommand.bCommandSuccessful &= GitSourceControlUtils::RunLFSCommand(TEXT("unlock"), InCommand.PathToGitRoot, FGitSourceControlModule::GetEmptyStringArray(), RelativeFiles,
+			InCommand.bCommandSuccessful &= GitSourceControlUtils::RunLFSCommand(TEXT("unlock"), InCommand.PathToGitRoot, InCommand.PathToGitBinary, FGitSourceControlModule::GetEmptyStringArray(), RelativeFiles,
 																				 InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
 			if (InCommand.bCommandSuccessful)
 			{
 				for (const auto& File : LockedFiles)
 				{
-					FGitLockedFilesCache::LockedFiles.Remove(File);
+					FGitLockedFilesCache::RemoveLockedFile(File);
 				}
 			}
 		}
@@ -853,6 +854,56 @@ bool FGitResolveWorker::Execute( class FGitSourceControlCommand& InCommand )
 bool FGitResolveWorker::UpdateStates() const
 {
 	return GitSourceControlUtils::UpdateCachedStates(States);
+}
+
+FName FGitMoveToChangelistWorker::GetName() const
+{
+	return "MoveToChangelist";
+}
+
+bool FGitMoveToChangelistWorker::UpdateStates() const
+{
+	return true;
+}
+
+bool FGitMoveToChangelistWorker::Execute(FGitSourceControlCommand& InCommand)
+{
+	check(InCommand.Operation->GetName() == GetName());
+
+	FGitSourceControlChangelist DestChangelist = InCommand.Changelist;
+	bool bResult = false;
+	if(DestChangelist.GetName().Equals(TEXT("Staged")))
+	{
+		bResult = GitSourceControlUtils::RunCommand(TEXT("add"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, FGitSourceControlModule::GetEmptyStringArray(), InCommand.Files, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
+	}
+	else if(DestChangelist.GetName().Equals(TEXT("Working")))
+	{
+		TArray<FString> Parameter;
+		Parameter.Add(TEXT("--staged"));
+		bResult = GitSourceControlUtils::RunCommand(TEXT("restore"), InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, Parameter, InCommand.Files, InCommand.ResultInfo.InfoMessages, InCommand.ResultInfo.ErrorMessages);
+	}
+	
+	if (bResult)
+	{
+		TMap<FString, FGitSourceControlState> DummyStates;
+		GitSourceControlUtils::RunUpdateStatus(InCommand.PathToGitBinary, InCommand.PathToRepositoryRoot, InCommand.bUsingGitLfsLocking, InCommand.Files, InCommand.ResultInfo.InfoMessages, DummyStates);
+	}
+	return bResult;
+}
+
+FName FGitUpdateStagingWorker::GetName() const
+{
+	return "UpdateChangelistsStatus";
+}
+
+bool FGitUpdateStagingWorker::Execute(FGitSourceControlCommand& InCommand)
+{
+	return GitSourceControlUtils::UpdateChangelistStateByCommand();
+}
+
+bool FGitUpdateStagingWorker::UpdateStates() const
+{
+	return true;
 }
 
 #undef LOCTEXT_NAMESPACE
