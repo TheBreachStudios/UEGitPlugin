@@ -5,13 +5,14 @@
 
 #pragma once
 
-#include "CoreMinimal.h"
+#include "Containers/UnrealString.h"
+#include "HAL/CriticalSection.h"
 
-class FGitSourceControlSettings
+class GITSOURCECONTROL_API FGitSourceControlSettings
 {
 public:
 	/** Get the Git Binary Path */
-	const FString GetBinaryPath() const;
+	const FString & GetBinaryPath() const;
 
 	/** Set the Git Binary Path */
 	bool SetBinaryPath(const FString& InString);

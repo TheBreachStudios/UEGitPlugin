@@ -1,13 +1,13 @@
-// Copyright (c) 2014-2020 Sebastien Rombauts (sebastien.rombauts@gmail.com)
+// Copyright (c) 2014-2023 Sebastien Rombauts (sebastien.rombauts@gmail.com)
 //
 // Distributed under the MIT License (MIT) (See accompanying file LICENSE.txt
 // or copy at http://opensource.org/licenses/MIT)
 
 #pragma once
 
-#include "CoreMinimal.h"
 #include "ISourceControlRevision.h"
 #include "Runtime/Launch/Resources/Version.h"
+#include "Misc/DateTime.h"
 
 /** Revision of a file, linked to a specific commit */
 class FGitSourceControlRevision : public ISourceControlRevision
@@ -71,6 +71,9 @@ public:
 
 	/** The size of the file at this revision */
 	int32 FileSize;
+
+	/** Dynamic repository root **/
+	FString PathToRepoRoot;
 };
 
 /** History composed of the last 100 revisions of the file */

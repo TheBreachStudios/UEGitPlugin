@@ -68,7 +68,7 @@ public:
 	TMap<const FString, FGitState> States;
 };
 
-/** Add an untracked file to source control (so only a subset of the git add command). */
+/** Add an untracked file to revision control (so only a subset of the git add command). */
 class FGitMarkForAddWorker : public IGitSourceControlWorker
 {
 public:
@@ -82,7 +82,7 @@ public:
 	TMap<const FString, FGitState> States;
 };
 
-/** Delete a file and remove it from source control. */
+/** Delete a file and remove it from revision control. */
 class FGitDeleteWorker : public IGitSourceControlWorker
 {
 public:
@@ -124,7 +124,7 @@ public:
 	TMap<const FString, FGitState> States;
 };
 
-/** Get source control status of files on local working copy. */
+/** Get revision control status of files on local working copy. */
 class FGitUpdateStatusWorker : public IGitSourceControlWorker
 {
 public:
@@ -179,6 +179,32 @@ public:
 	virtual bool Execute(class FGitSourceControlCommand& InCommand) override;
 	virtual bool UpdateStates() const override;
 
+	/** Temporary states for results */
+	TMap<const FString, FGitState> States;
+};
+
+class FGitMoveToChangelistWorker : public IGitSourceControlWorker
+{
+public:
+	virtual ~FGitMoveToChangelistWorker() {}
+	// IGitSourceControlWorker interface
+	virtual FName GetName() const override;
+	virtual bool Execute(class FGitSourceControlCommand& InCommand) override;
+	virtual bool UpdateStates() const override;
+	
+	/** Temporary states for results */
+	TMap<const FString, FGitState> States;
+};
+
+class FGitUpdateStagingWorker: public IGitSourceControlWorker
+{
+public:
+	virtual ~FGitUpdateStagingWorker() {}
+	// IGitSourceControlWorker interface
+	virtual FName GetName() const override;
+	virtual bool Execute(class FGitSourceControlCommand& InCommand) override;
+	virtual bool UpdateStates() const override;
+	
 	/** Temporary states for results */
 	TMap<const FString, FGitState> States;
 };

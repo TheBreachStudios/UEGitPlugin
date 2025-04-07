@@ -30,7 +30,7 @@
 
 #include "Logging/MessageLog.h"
 #include "SourceControlHelpers.h"
-#include "SourceControlWindows/Public/SourceControlWindows.h"
+#include "SourceControlWindows.h"
 
 #if ENGINE_MAJOR_VERSION == 5
 #include "ToolMenus.h"
@@ -38,7 +38,10 @@
 #include "ToolMenuMisc.h"
 #endif
 
+#include "UObject/Linker.h"
+
 static const FName GitSourceControlMenuTabName(TEXT("GitSourceControlMenu"));
+static const FName LevelEditorName(TEXT("LevelEditor"));
 
 #define LOCTEXT_NAMESPACE "GitSourceControl"
 
@@ -47,7 +50,7 @@ TWeakPtr<SNotificationItem> FGitSourceControlMenu::OperationInProgressNotificati
 void FGitSourceControlMenu::Register()
 {
 #if ENGINE_MAJOR_VERSION >= 5
-	FToolMenuOwnerScoped SourceControlMenuOwner("GitSourceControlMenu");
+    FToolMenuOwnerScoped SourceControlMenuOwner( GitSourceControlMenuTabName );
 	if (UToolMenus* ToolMenus = UToolMenus::Get())
 	{
 		UToolMenu* SourceControlMenu = ToolMenus->ExtendMenu("StatusBar.ToolBar.SourceControl");
@@ -57,7 +60,7 @@ void FGitSourceControlMenu::Register()
 	}
 #else
 	// Register the extension with the level editor
-	FLevelEditorModule* LevelEditorModule = FModuleManager::GetModulePtr<FLevelEditorModule>(TEXT("LevelEditor"));
+    FLevelEditorModule * LevelEditorModule = FModuleManager::GetModulePtr< FLevelEditorModule >( LevelEditorName );
 	if (LevelEditorModule)
 	{
 		FLevelEditorModule::FLevelEditorMenuExtender ViewMenuExtender = FLevelEditorModule::FLevelEditorMenuExtender::CreateRaw(this, &FGitSourceControlMenu::OnExtendLevelEditorViewMenu);
@@ -77,7 +80,7 @@ void FGitSourceControlMenu::Unregister()
 	}
 #else
 	// Unregister the level editor extensions
-	FLevelEditorModule* LevelEditorModule = FModuleManager::GetModulePtr<FLevelEditorModule>("LevelEditor");
+    FLevelEditorModule * LevelEditorModule = FModuleManager::GetModulePtr< FLevelEditorModule >( LevelEditorName );
 	if (LevelEditorModule)
 	{
 		LevelEditorModule->GetAllLevelEditorToolbarSourceControlMenuExtenders().RemoveAll([=](const FLevelEditorModule::FLevelEditorMenuExtender& Extender) { return Extender.GetHandle() == ViewMenuExtenderHandle; });
@@ -218,7 +221,7 @@ void FGitSourceControlMenu::SyncClicked()
 	else
 	{
 		FMessageLog SourceControlLog("SourceControl");
-		SourceControlLog.Warning(LOCTEXT("SourceControlMenu_InProgress", "Source control operation already in progress"));
+		SourceControlLog.Warning(LOCTEXT("SourceControlMenu_InProgress", "Revision control operation already in progress"));
 		SourceControlLog.Notify();
 	}
 }
@@ -228,7 +231,7 @@ void FGitSourceControlMenu::CommitClicked()
 	if (OperationInProgressNotification.IsValid())
 	{
 		FMessageLog SourceControlLog("SourceControl");
-		SourceControlLog.Warning(LOCTEXT("SourceControlMenu_InProgress", "Source control operation already in progress"));
+		SourceControlLog.Warning(LOCTEXT("SourceControlMenu_InProgress", "Revision control operation already in progress"));
 		SourceControlLog.Notify();
 		return;
 	}
@@ -264,7 +267,7 @@ void FGitSourceControlMenu::PushClicked()
 	else
 	{
 		FMessageLog SourceControlLog("SourceControl");
-		SourceControlLog.Warning(LOCTEXT("SourceControlMenu_InProgress", "Source control operation already in progress"));
+		SourceControlLog.Warning(LOCTEXT("SourceControlMenu_InProgress", "Revision control operation already in progress"));
 		SourceControlLog.Notify();
 	}
 }
@@ -274,7 +277,7 @@ void FGitSourceControlMenu::RevertClicked()
 	if (OperationInProgressNotification.IsValid())
 	{
 		FMessageLog SourceControlLog("SourceControl");
-		SourceControlLog.Warning(LOCTEXT("SourceControlMenu_InProgress", "Source control operation already in progress"));
+		SourceControlLog.Warning(LOCTEXT("SourceControlMenu_InProgress", "Revision control operation already in progress"));
 		SourceControlLog.Notify();
 		return;
 	}
@@ -417,7 +420,7 @@ void FGitSourceControlMenu::RefreshClicked()
 	else
 	{
 		FMessageLog SourceControlLog("SourceControl");
-		SourceControlLog.Warning(LOCTEXT("SourceControlMenu_InProgress", "Source control operation already in progress"));
+		SourceControlLog.Warning(LOCTEXT("SourceControlMenu_InProgress", "Revision control operation already in progress"));
 		SourceControlLog.Notify();
 	}
 }
@@ -581,7 +584,7 @@ void FGitSourceControlMenu::AddMenuExtension(FMenuBuilder& Builder)
 		"GitRefresh",
 #endif
 		LOCTEXT("GitRefresh",			"Refresh"),
-		LOCTEXT("GitRefreshTooltip",	"Update the source control status of all files in the local repository."),
+		LOCTEXT("GitRefreshTooltip",	"Update the revision control status of all files in the local repository."),
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
 		FSlateIcon(FAppStyle::GetAppStyleSetName(), "SourceControl.Actions.Refresh"),
 #else

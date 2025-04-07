@@ -1,25 +1,26 @@
-// Copyright (c) 2014-2020 Sebastien Rombauts (sebastien.rombauts@gmail.com)
+// Copyright (c) 2014-2023 Sebastien Rombauts (sebastien.rombauts@gmail.com)
 //
 // Distributed under the MIT License (MIT) (See accompanying file LICENSE.txt
 // or copy at http://opensource.org/licenses/MIT)
 
 #include "GitSourceControlProvider.h"
 
-#include "HAL/PlatformProcess.h"
+#include "GitMessageLog.h"
+#include "GitSourceControlState.h"
 #include "Misc/Paths.h"
 #include "Misc/QueuedThreadPool.h"
-#include "Modules/ModuleManager.h"
-#include "Widgets/DeclarativeSyntaxSupport.h"
 #include "GitSourceControlCommand.h"
 #include "ISourceControlModule.h"
 #include "GitSourceControlModule.h"
 #include "GitSourceControlUtils.h"
 #include "SGitSourceControlSettings.h"
 #include "GitSourceControlRunner.h"
+#include "GitSourceControlChangelistState.h"
 #include "Logging/MessageLog.h"
 #include "ScopedSourceControlProgress.h"
 #include "SourceControlHelpers.h"
 #include "SourceControlOperations.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 #include "Async/Async.h"
 #include "GenericPlatform/GenericPlatformFile.h"
 #include "HAL/FileManager.h"
@@ -27,6 +28,8 @@
 #include "Misc/App.h"
 #include "Misc/EngineVersion.h"
 #include "Misc/MessageDialog.h"
+#include "UObject/ObjectSaveContext.h"
+#include "UObject/Package.h"
 
 #define LOCTEXT_NAMESPACE "GitSourceControl"
 
@@ -45,6 +48,11 @@ void FGitSourceControlProvider::Init(bool bForceConnection)
 
 		CheckGitAvailability();
 	}
+
+	UPackage::PackageSavedWithContextEvent.AddStatic(&GitSourceControlUtils::UpdateFileStagingOnSaved);
+	
+	FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+	AssetRegistryModule.Get().OnAssetRenamed().AddStatic(&GitSourceControlUtils::UpdateStateOnAssetRename);	
 
 	// bForceConnection: not used anymore
 }
@@ -98,6 +106,8 @@ void FGitSourceControlProvider::CheckRepositoryStatus()
 		bGitRepositoryFound = false;
 		return;
 	}
+	PathToRepositoryRoot = PathToGitRoot;
+
 	if (!GitSourceControlUtils::CheckGitAvailability(PathToGitBinary, &GitVersion))
 	{
 		UE_LOG(LogSourceControl, Error, TEXT("Failed to find valid Git executable."));
@@ -222,7 +232,7 @@ void FGitSourceControlProvider::Close()
 {
 	// clear the cache
 	StateCache.Empty();
-	// Remove all extensions to the "Source Control" menu in the Editor Toolbar
+	// Remove all extensions to the "Revision Control" menu in the Editor Toolbar
 	GitSourceControlMenu.Unregister();
 
 	bGitAvailable = false;
@@ -249,6 +259,23 @@ TSharedRef<FGitSourceControlState, ESPMode::ThreadSafe> FGitSourceControlProvide
 		// cache an unknown state for this item
 		TSharedRef<FGitSourceControlState, ESPMode::ThreadSafe> NewState = MakeShareable( new FGitSourceControlState(Filename) );
 		StateCache.Add(Filename, NewState);
+		return NewState;
+	}
+}
+
+TSharedRef<FGitSourceControlChangelistState, ESPMode::ThreadSafe> FGitSourceControlProvider::GetStateInternal(const FGitSourceControlChangelist& InChangelist)
+{
+	TSharedRef<FGitSourceControlChangelistState, ESPMode::ThreadSafe>* State = ChangelistsStateCache.Find(InChangelist);
+	if (State != NULL)
+	{
+		// found cached item
+		return (*State);
+	}
+	else
+	{
+		// cache an unknown state for this item
+		TSharedRef<FGitSourceControlChangelistState, ESPMode::ThreadSafe> NewState = MakeShared<FGitSourceControlChangelistState>(InChangelist);
+		ChangelistsStateCache.Add(InChangelist, NewState);
 		return NewState;
 	}
 }
@@ -280,13 +307,13 @@ FText FGitSourceControlProvider::GetStatusText() const
 	return FText::Format( NSLOCTEXT("GitStatusText", "{ErrorText}Enabled: {IsAvailable}", "Local repository: {RepositoryName}\nRemote: {RemoteUrl}\nUser: {UserName}\nE-mail: {UserEmail}\n[{BranchName} {CommitId}] {CommitSummary}"), Args );
 }
 
-/** Quick check if source control is enabled */
+/** Quick check if revision control is enabled */
 bool FGitSourceControlProvider::IsEnabled() const
 {
 	return bGitRepositoryFound;
 }
 
-/** Quick check if source control is available for use (useful for server-based providers) */
+/** Quick check if revision control is available for use (useful for server-based providers) */
 bool FGitSourceControlProvider::IsAvailable() const
 {
 	return bGitRepositoryFound;
@@ -335,7 +362,17 @@ ECommandResult::Type FGitSourceControlProvider::GetState( const TArray<FString>&
 #if ENGINE_MAJOR_VERSION >= 5
 ECommandResult::Type FGitSourceControlProvider::GetState(const TArray<FSourceControlChangelistRef>& InChangelists, TArray<FSourceControlChangelistStateRef>& OutState, EStateCacheUsage::Type InStateCacheUsage)
 {
-    return ECommandResult::Failed;
+	if (!IsEnabled())
+	{
+		return ECommandResult::Failed;
+	}
+
+	for (FSourceControlChangelistRef Changelist : InChangelists)
+	{
+		FGitSourceControlChangelistRef GitChangelist = StaticCastSharedRef<FGitSourceControlChangelist>(Changelist);
+		OutState.Add(GetStateInternal(GitChangelist.Get()));
+	}
+	return ECommandResult::Succeeded;
 }
 #endif
 
@@ -401,19 +438,19 @@ ECommandResult::Type FGitSourceControlProvider::Execute( const FSourceControlOpe
 		return ECommandResult::Failed;
 	}
 
-	const TArray<FString>& AbsoluteFiles = SourceControlHelpers::AbsoluteFilenames(InFiles);
+	TArray<FString> AbsoluteFiles = SourceControlHelpers::AbsoluteFilenames(InFiles);
 
 	// Query to see if we allow this operation
 	TSharedPtr<IGitSourceControlWorker, ESPMode::ThreadSafe> Worker = CreateWorker(InOperation->GetName());
 	if(!Worker.IsValid())
 	{
-		// this operation is unsupported by this source control provider
+		// this operation is unsupported by this revision control provider
 		FFormatNamedArguments Arguments;
 		Arguments.Add( TEXT("OperationName"), FText::FromName(InOperation->GetName()) );
 		Arguments.Add( TEXT("ProviderName"), FText::FromName(GetName()) );
-		FText Message(FText::Format(LOCTEXT("UnsupportedOperation", "Operation '{OperationName}' not supported by source control provider '{ProviderName}'"), Arguments));
+		FText Message(FText::Format(LOCTEXT("UnsupportedOperation", "Operation '{OperationName}' not supported by revision control provider '{ProviderName}'"), Arguments));
 
-		FMessageLog("SourceControl").Error(Message);
+		FTSMessageLog("SourceControl").Error(Message);
 		InOperation->AddErrorMessge(Message);
 
 		InOperationCompleteDelegate.ExecuteIfBound(InOperation, ECommandResult::Failed);
@@ -421,9 +458,13 @@ ECommandResult::Type FGitSourceControlProvider::Execute( const FSourceControlOpe
 	}
 
 	FGitSourceControlCommand* Command = new FGitSourceControlCommand(InOperation, Worker.ToSharedRef());
+	Command->UpdateRepositoryRootIfSubmodule(AbsoluteFiles);
 	Command->Files = AbsoluteFiles;
 	Command->OperationCompleteDelegate = InOperationCompleteDelegate;
 
+	TSharedPtr<FGitSourceControlChangelist, ESPMode::ThreadSafe> ChangelistPtr = StaticCastSharedPtr<FGitSourceControlChangelist>(InChangelist);
+	Command->Changelist = ChangelistPtr ? ChangelistPtr.ToSharedRef().Get() : FGitSourceControlChangelist();
+	
 	// fire off operation
 	if(InConcurrency == EConcurrency::Synchronous)
 	{
@@ -493,7 +534,7 @@ bool FGitSourceControlProvider::UsesLocalReadOnlyState() const
 
 bool FGitSourceControlProvider::UsesChangelists() const
 {
-	return false;
+	return true;
 }
 
 bool FGitSourceControlProvider::UsesCheckout() const
@@ -504,17 +545,53 @@ bool FGitSourceControlProvider::UsesCheckout() const
 #if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 1
 bool FGitSourceControlProvider::UsesFileRevisions() const
 {
-	return false;
+	return true;
 }
 
 TOptional<bool> FGitSourceControlProvider::IsAtLatestRevision() const
 {
-	return {};
+	return TOptional<bool>();
 }
 
 TOptional<int> FGitSourceControlProvider::GetNumLocalChanges() const
 {
-	return {};
+	return TOptional<int>();
+}
+#endif
+
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 2
+bool FGitSourceControlProvider::AllowsDiffAgainstDepot() const
+{
+	return true;
+}
+
+bool FGitSourceControlProvider::UsesUncontrolledChangelists() const
+{
+	return true;
+}
+
+bool FGitSourceControlProvider::UsesSnapshots() const
+{
+	return false;
+}
+#endif
+
+#if ENGINE_MAJOR_VERSION == 5 && ENGINE_MINOR_VERSION >= 3
+bool FGitSourceControlProvider::CanExecuteOperation(const FSourceControlOperationRef& InOperation) const {
+	return WorkersMap.Find(InOperation->GetName()) != nullptr;
+}
+
+TMap<ISourceControlProvider::EStatus, FString> FGitSourceControlProvider::GetStatus() const
+{
+	TMap<EStatus, FString> Result;
+	Result.Add(EStatus::Enabled, IsEnabled() ? TEXT("Yes") : TEXT("No") );
+	Result.Add(EStatus::Connected, (IsEnabled() && IsAvailable()) ? TEXT("Yes") : TEXT("No") );
+	Result.Add(EStatus::User, UserName);
+	Result.Add(EStatus::Repository, PathToRepositoryRoot);
+	Result.Add(EStatus::Remote, RemoteUrl);
+	Result.Add(EStatus::Branch, BranchName);
+	Result.Add(EStatus::Email, UserEmail);
+	return Result;
 }
 #endif
 
@@ -536,7 +613,7 @@ void FGitSourceControlProvider::RegisterWorker( const FName& InName, const FGetG
 
 void FGitSourceControlProvider::OutputCommandMessages(const FGitSourceControlCommand& InCommand) const
 {
-	FMessageLog SourceControlLog("SourceControl");
+	FTSMessageLog SourceControlLog("SourceControl");
 
 	for (int32 ErrorIndex = 0; ErrorIndex < InCommand.ResultInfo.ErrorMessages.Num(); ++ErrorIndex)
 	{
@@ -639,7 +716,14 @@ TArray< TSharedRef<ISourceControlLabel> > FGitSourceControlProvider::GetLabels( 
 #if ENGINE_MAJOR_VERSION >= 5
 TArray<FSourceControlChangelistRef> FGitSourceControlProvider::GetChangelists( EStateCacheUsage::Type InStateCacheUsage )
 {
-    return TArray<FSourceControlChangelistRef>();
+	if (!IsEnabled())
+	{
+		return TArray<FSourceControlChangelistRef>();
+	}
+	
+	TArray<FSourceControlChangelistRef> Changelists;
+	Algo::Transform(ChangelistsStateCache, Changelists, [](const auto& Pair) { return MakeShared<FGitSourceControlChangelist, ESPMode::ThreadSafe>(Pair.Key); });
+	return Changelists;
 }
 #endif
 
@@ -732,7 +816,7 @@ ECommandResult::Type FGitSourceControlProvider::IssueCommand(FGitSourceControlCo
 	}
 	else
 	{
-		UE_LOG(LogSourceControl, Log, TEXT("There are no threads available to process the source control command '%s'. Running synchronously."), *InCommand.Operation->GetName().ToString());
+		UE_LOG(LogSourceControl, Log, TEXT("There are no threads available to process the revision control command '%s'. Running synchronously."), *InCommand.Operation->GetName().ToString());
 
 		InCommand.bCommandSuccessful = InCommand.DoWork();
 
@@ -755,7 +839,7 @@ bool FGitSourceControlProvider::QueryStateBranchConfig(const FString& ConfigSrc,
 
 	if (!bGitAvailable || !bGitRepositoryFound)
 	{
-		FMessageLog("SourceControl").Error(LOCTEXT("StatusBranchConfigNoConnection", "Unable to retrieve status branch configuration from repo, no connection"));
+		FTSMessageLog("SourceControl").Error(LOCTEXT("StatusBranchConfigNoConnection", "Unable to retrieve status branch configuration from repo, no connection"));
 		return false;
 	}
 
@@ -767,7 +851,7 @@ bool FGitSourceControlProvider::QueryStateBranchConfig(const FString& ConfigSrc,
 
 void FGitSourceControlProvider::RegisterStateBranches(const TArray<FString>& BranchNames, const FString& ContentRootIn)
 {
-	StatusBranchNames = BranchNames;
+	StatusBranchNamePatternsInternal = BranchNames;
 }
 
 int32 FGitSourceControlProvider::GetStateBranchIndex(const FString& StateBranchName) const
@@ -778,6 +862,7 @@ int32 FGitSourceControlProvider::GetStateBranchIndex(const FString& StateBranchN
 
 	// Check if we are checking the index of the current branch
 	// UE uses FEngineVersion for the current branch name because of UEGames setup, but we want to handle otherwise for Git repos.
+	auto StatusBranchNames = GetStatusBranchNames();
 	if (StateBranchName == FEngineVersion::Current().GetBranch())
 	{
 		const int32 CurrentBranchStatusIndex = StatusBranchNames.IndexOfByKey(BranchName);
@@ -798,6 +883,28 @@ int32 FGitSourceControlProvider::GetStateBranchIndex(const FString& StateBranchN
 	// If we're not checking the current branch, then we don't need to do special handling.
 	// If it is not a status branch, there is no message
 	return StatusBranchNames.IndexOfByKey(StateBranchName);
+}
+
+TArray<FString> FGitSourceControlProvider::GetStatusBranchNames() const
+{
+	TArray<FString> StatusBranches;
+	if(PathToGitBinary.IsEmpty() || PathToRepositoryRoot.IsEmpty())
+		return StatusBranches;
+	
+	for (int i = 0; i < StatusBranchNamePatternsInternal.Num(); i++)
+	{
+		TArray<FString> Matches;
+		bool bResult = GitSourceControlUtils::GetRemoteBranchesWildcard(PathToGitBinary, PathToRepositoryRoot, StatusBranchNamePatternsInternal[i], Matches);
+		if (bResult && Matches.Num() > 0)
+		{
+			for (int j = 0; j < Matches.Num(); j++)
+			{
+				StatusBranches.Add(Matches[j].TrimStartAndEnd());	
+			}
+		}
+	}
+	
+	return StatusBranches;
 }
 
 #undef LOCTEXT_NAMESPACE
